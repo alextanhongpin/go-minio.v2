@@ -7,29 +7,11 @@ import {
   downloadImage,
 } from "service/image-uploader";
 
-function App() {
-  const [image, setImage] = useState(null);
-  const [value, setValue] = useState("");
+function ImagePreview({ value: defaultValue = "", status }) {
+  const [value, setValue] = useState(defaultValue);
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
   const timeout = useRef(null);
-  const onDrop = useCallback(async (acceptedFiles) => {
-    const file = acceptedFiles[0];
-
-    try {
-      const imageUrl = await uploadImage(file);
-      setImage({ url: imageUrl, name: file.name });
-      setValue(imageUrl);
-    } catch (err) {
-      setError(err);
-    }
-  }, []);
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: "image/*",
-    maxFiles: 1, // Only 1 image per drop.
-  });
 
   useEffect(() => {
     if (!copied) return;
@@ -40,14 +22,14 @@ function App() {
   }, [copied]);
 
   const handleCopyToClipboard = () => {
-    if (!image?.url) {
+    if (!value) {
       return;
     }
     if (!navigator.clipboard) {
       setError("Unable to copy to clipboard");
       return;
     }
-    navigator.clipboard.writeText(image.url).then(
+    navigator.clipboard.writeText(value).then(
       function () {
         setCopied(true);
       },
@@ -62,7 +44,6 @@ function App() {
     // We only handle uploading if the image is from an external source,
     // and not stored in our buckets.
     if (isInternalImageSource(value)) {
-      setImage({ url: value, name: value });
       setValue(value);
       return;
     }
@@ -72,7 +53,6 @@ function App() {
     try {
       const file = await downloadImage(value);
       const imageUrl = await uploadImage(file);
-      setImage({ url: imageUrl, name: file.name });
       setValue(imageUrl);
     } catch (err) {
       setError(err);
@@ -80,12 +60,41 @@ function App() {
   };
 
   return (
+    <div>
+      {error && <div>{error.message}</div>}
+      <div>
+        <input type="text" value={value} onChange={handleChange} />
+        <button onClick={handleCopyToClipboard}>
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      {status}
+
+      {value && (
+        <img className={styles.image} key={value} src={value} alt={value} />
+      )}
+    </div>
+  );
+}
+
+function App() {
+  const [images, setImages] = useState([]);
+  const onDrop = useCallback(async (acceptedFiles) => {
+    const images = await Promise.allSettled(acceptedFiles.map(uploadImage));
+    setImages(images);
+  }, []);
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: "image/*",
+    maxFiles: 5, // Only 5 images per drop.
+  });
+
+  return (
     <div className="App">
       <header>
         <h1>Image Uploader</h1>
       </header>
-
-      {error && <div>{error.message}</div>}
 
       <div {...getRootProps()} className={styles.dragzone}>
         <input {...getInputProps()} />
@@ -96,21 +105,9 @@ function App() {
         )}
       </div>
 
-      <div>
-        <input type="text" value={value} onChange={handleChange} />
-        <button onClick={handleCopyToClipboard}>
-          {copied ? "Copied" : "Copy"}
-        </button>
-      </div>
-
-      {image && (
-        <img
-          className={styles.image}
-          key={image?.url}
-          src={image?.url}
-          alt={image.name}
-        />
-      )}
+      {images.map((props) => (
+        <ImagePreview {...props} />
+      ))}
     </div>
   );
 }
