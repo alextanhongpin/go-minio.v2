@@ -1,0 +1,9 @@
+.dragzone {
+  background: #eee;
+  padding: 2rem;
+}
+
+.image {
+  max-width: 480px;
+  height: auto;
+}

@@ -1,19 +1,11 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
-	"mime"
 	"net/http"
-	"net/url"
-	"path/filepath"
-	"strings"
-	"time"
 
-	"github.com/google/uuid"
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -26,7 +18,7 @@ func main() {
 	folder := "images"
 	useSSL := false
 
-	publicEndpoint := "http://" + endpoint
+	publicEndpoint := fmt.Sprintf("http://%s/%s", endpoint, bucketName)
 
 	// Initialize minio client object.
 	minioClient, err := minio.New(endpoint, &minio.Options{
@@ -37,23 +29,24 @@ func main() {
 		log.Fatalln(err)
 	}
 
-	ctx := context.Background()
-	b, err := minioClient.ListBuckets(ctx)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	log.Println(b)
-
 	uploader := NewImageUploader(minioClient, bucketName)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/presign", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/presign", CORS(Presign(uploader, folder, publicEndpoint)))
+
+	fmt.Println("Listening on port :8080. Press Ctrl+C to exit.")
+	http.ListenAndServe(":8080", mux)
+}
+
+func Presign(uploader *ImageUploader, folder, publicEndpoint string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
 		fileType := r.URL.Query().Get("fileType")
+		ctx := r.Context()
 		presignURL, assetPath, formData, err := uploader.PresignURL(ctx, folder, fileType)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -66,97 +59,28 @@ func main() {
 		}
 		err = json.NewEncoder(w).Encode(response{
 			PresignURL: presignURL.String(),
-			AssetURL:   filepath.Join(publicEndpoint, assetPath),
+			AssetURL:   publicEndpoint + "/" + assetPath,
 			FormData:   formData,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-	})
-
-	http.ListenAndServe(":8080", mux)
-}
-
-type ImageUploader struct {
-	client *minio.Client
-	bucket string
-}
-
-func NewImageUploader(client *minio.Client, bucket string) *ImageUploader {
-	return &ImageUploader{
-		client: client,
-		bucket: bucket,
 	}
 }
 
-func (u *ImageUploader) PresignURL(ctx context.Context, folder, fileType string) (*url.URL, string, map[string]string, error) {
-	// Initialize policy condition config.
-	policy := minio.NewPostPolicy()
+func CORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Access-Control-Allow-Origin", "*")
+		w.Header().Add("Access-Control-Allow-Credentials", "true")
+		w.Header().Add("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		w.Header().Add("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 
-	key, err := newFileNameInFolder(folder, fileType)
-	if err != nil {
-		return nil, "", nil, err
-	}
-
-	// Apply upload policy restrictions.
-	policy.SetBucket(u.bucket)
-	policy.SetKey(key)
-	policy.SetExpires(time.Now().Add(15 * time.Minute))
-
-	// Only allow images.
-	policy.SetContentType(fileType)
-
-	// Only allow content size in range 1KB to 5MB.
-	policy.SetContentLengthRange(1024, 5*1024*1024)
-
-	// Add a user metadata using key custom and value user.
-	// NOTE: Might be useful?
-	policy.SetUserMetadata("custom", "user")
-
-	url, formData, err := u.client.PresignedPostPolicy(ctx, policy)
-	return url, key, formData, err
-}
-
-var ErrExtensionNotFound = errors.New("extension not found")
-
-func extensionByType(mimeType string) (extension string, err error) {
-	if !strings.HasPrefix(mimeType, "image/") {
-		return "", ErrExtensionNotFound
-	}
-	v, err := mime.ExtensionsByType(mimeType)
-	if err != nil {
-		return "", fmt.Errorf("%w: %s", ErrExtensionNotFound, err)
-	}
-	if len(v) != 1 {
-		t := strings.Join(v, ", ")
-		if t == "" {
-			t = "none"
+		if r.Method == "OPTIONS" {
+			http.Error(w, "No Content", http.StatusNoContent)
+			return
 		}
-		return "", fmt.Errorf("%w: %s", ErrExtensionNotFound, t)
+
+		next(w, r)
 	}
-	return v[0], nil
-}
-
-func newFileNameInFolder(folder, fileType string) (string, error) {
-	ext, err := extensionByType(fileType) // E.g. image/png, image/svg+xml
-	if err != nil {
-		return "", err
-	}
-	// Remove leading dot.
-	ext = strings.TrimPrefix(ext, ".")
-
-	// Remove leading and trailing slashes.
-	folder = strings.TrimPrefix(folder, "/")
-	folder = strings.TrimSuffix(folder, "/")
-
-	// Image name is always a uniquely generated UUID.
-	id := uuid.New()
-
-	// Possible to not have folder. Images will be stored in root folder.
-	if folder == "" {
-		return fmt.Sprintf("%s.%s", id, ext), nil
-	}
-
-	return fmt.Sprintf("%s/%s.%s", folder, id, ext), nil
 }
